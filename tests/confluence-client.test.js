@@ -2,6 +2,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const FormData = require('form-data');
+const axios = require('axios');
 const ConfluenceClient = require('../lib/confluence-client');
 const MockAdapter = require('axios-mock-adapter');
 
@@ -49,6 +50,64 @@ describe('ConfluenceClient', () => {
     });
   });
 
+  describe('protocol handling', () => {
+    test('defaults to https when protocol is not specified', () => {
+      expect(client.protocol).toBe('https');
+      expect(client.baseURL).toMatch(/^https:\/\//);
+    });
+
+    test('uses http protocol when configured', () => {
+      const httpClient = new ConfluenceClient({
+        domain: 'internal.example.com',
+        token: 'token',
+        protocol: 'http'
+      });
+      expect(httpClient.protocol).toBe('http');
+      expect(httpClient.baseURL).toBe('http://internal.example.com/rest/api');
+    });
+
+    test('falls back to https for invalid protocol', () => {
+      const invalidClient = new ConfluenceClient({
+        domain: 'example.com',
+        token: 'token',
+        protocol: 'ftp'
+      });
+      expect(invalidClient.protocol).toBe('https');
+      expect(invalidClient.baseURL).toBe('https://example.com/rest/api');
+    });
+
+    test('buildUrl uses configured protocol', () => {
+      const httpClient = new ConfluenceClient({
+        domain: 'internal.example.com',
+        token: 'token',
+        protocol: 'http'
+      });
+      expect(httpClient.buildUrl('/wiki/spaces/TEST')).toBe('http://internal.example.com/wiki/spaces/TEST');
+    });
+
+    test('buildUrl defaults to https', () => {
+      expect(client.buildUrl('/wiki/test')).toBe('https://test.atlassian.net/wiki/test');
+    });
+
+    test('toAbsoluteUrl uses configured protocol', () => {
+      const httpClient = new ConfluenceClient({
+        domain: 'internal.example.com',
+        token: 'token',
+        protocol: 'http'
+      });
+      expect(httpClient.toAbsoluteUrl('/download/file.pdf')).toBe('http://internal.example.com/download/file.pdf');
+    });
+
+    test('toAbsoluteUrl preserves existing full URLs regardless of protocol config', () => {
+      const httpClient = new ConfluenceClient({
+        domain: 'internal.example.com',
+        token: 'token',
+        protocol: 'http'
+      });
+      expect(httpClient.toAbsoluteUrl('https://cdn.example.com/file.pdf')).toBe('https://cdn.example.com/file.pdf');
+    });
+  });
+
   describe('api path handling', () => {
     test('defaults to /rest/api when path is not provided', () => {
       const defaultClient = new ConfluenceClient({
@@ -67,6 +126,99 @@ describe('ConfluenceClient', () => {
       });
 
       expect(customClient.baseURL).toBe('https://cloud.example/wiki/rest/api');
+    });
+
+    test('sets webUrlPrefix to /wiki when apiPath starts with /wiki/', () => {
+      const cloudClient = new ConfluenceClient({
+        domain: 'test.atlassian.net',
+        token: 'cloud-token',
+        apiPath: '/wiki/rest/api'
+      });
+
+      expect(cloudClient.webUrlPrefix).toBe('/wiki');
+    });
+
+    test('sets webUrlPrefix to empty string when apiPath does not start with /wiki/', () => {
+      const serverClient = new ConfluenceClient({
+        domain: 'confluence.example.com',
+        token: 'server-token',
+        apiPath: '/rest/api'
+      });
+
+      expect(serverClient.webUrlPrefix).toBe('');
+    });
+
+    test('sets webUrlPrefix to empty string when apiPath is not provided', () => {
+      const defaultClient = new ConfluenceClient({
+        domain: 'example.com',
+        token: 'default-token'
+      });
+
+      expect(defaultClient.webUrlPrefix).toBe('');
+    });
+
+    test('sets webUrlPrefix to /wiki when apiPath is wiki/rest/api/ (missing leading slash)', () => {
+      const clientWithMissingSlash = new ConfluenceClient({
+        domain: 'confluence.example.com',
+        token: 'test-token',
+        apiPath: 'wiki/rest/api/'
+      });
+
+      expect(clientWithMissingSlash.webUrlPrefix).toBe('/wiki');
+    });
+
+    test('sets webUrlPrefix to /wiki for scoped token api paths that include /wiki/rest/api', () => {
+      const scopedClient = new ConfluenceClient({
+        domain: 'api.atlassian.com',
+        token: 'scoped-token',
+        apiPath: '/ex/confluence/cloud-id/wiki/rest/api'
+      });
+
+      expect(scopedClient.webUrlPrefix).toBe('/wiki');
+    });
+
+    test('toAbsoluteUrl prepends /wiki context path on Atlassian Cloud', () => {
+      const cloudClient = new ConfluenceClient({
+        domain: 'test.atlassian.net',
+        token: 'cloud-token',
+        apiPath: '/wiki/rest/api'
+      });
+
+      expect(cloudClient.toAbsoluteUrl('/download/attachments/123/file.png?version=1&modificationDate=1700000000000&cacheVersion=1&api=v2'))
+        .toBe('https://test.atlassian.net/wiki/download/attachments/123/file.png?version=1&modificationDate=1700000000000&cacheVersion=1&api=v2');
+    });
+
+    test('toAbsoluteUrl does not double-prepend /wiki when path already starts with it', () => {
+      const cloudClient = new ConfluenceClient({
+        domain: 'test.atlassian.net',
+        token: 'cloud-token',
+        apiPath: '/wiki/rest/api'
+      });
+
+      expect(cloudClient.toAbsoluteUrl('/wiki/download/attachments/123/file.png'))
+        .toBe('https://test.atlassian.net/wiki/download/attachments/123/file.png');
+    });
+
+    test('toAbsoluteUrl leaves Server/DC paths untouched when webUrlPrefix is empty', () => {
+      const serverClient = new ConfluenceClient({
+        domain: 'confluence.example.com',
+        token: 'server-token',
+        apiPath: '/rest/api'
+      });
+
+      expect(serverClient.toAbsoluteUrl('/download/attachments/123/file.png'))
+        .toBe('https://confluence.example.com/download/attachments/123/file.png');
+    });
+
+    test('toAbsoluteUrl prefers the API-provided base URL when available', () => {
+      const scopedClient = new ConfluenceClient({
+        domain: 'api.atlassian.com',
+        token: 'scoped-token',
+        apiPath: '/ex/confluence/cloud-id/wiki/rest/api'
+      });
+
+      expect(scopedClient.toAbsoluteUrl('/spaces/ENG/pages/123/Architecture+Overview', 'https://tenant.atlassian.net/wiki'))
+        .toBe('https://tenant.atlassian.net/wiki/spaces/ENG/pages/123/Architecture+Overview');
     });
   });
 
@@ -98,6 +250,413 @@ describe('ConfluenceClient', () => {
         token: 'missing-email',
         authType: 'basic'
       })).toThrow('Basic authentication requires an email address or username.');
+    });
+
+    test('supports mtls auth without an Authorization header', () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'confluence-mtls-'));
+      const certPath = path.join(tmpDir, 'client.pem');
+      const keyPath = path.join(tmpDir, 'client.key');
+      const caPath = path.join(tmpDir, 'ca.pem');
+      fs.writeFileSync(certPath, 'client-cert');
+      fs.writeFileSync(keyPath, 'client-key');
+      fs.writeFileSync(caPath, 'ca-cert');
+
+      try {
+        const mtlsClient = new ConfluenceClient({
+          domain: 'api.collaborate.akamai.com',
+          authType: 'mtls',
+          apiPath: '/confluence/rest/api',
+          mtls: {
+            caCert: caPath,
+            clientCert: certPath,
+            clientKey: keyPath,
+          }
+        });
+
+        expect(mtlsClient.client.defaults.headers.Authorization).toBeUndefined();
+        expect(mtlsClient.client.defaults.httpsAgent.options.ca.toString()).toBe('ca-cert');
+        expect(mtlsClient.client.defaults.httpsAgent.options.cert.toString()).toBe('client-cert');
+        expect(mtlsClient.client.defaults.httpsAgent.options.key.toString()).toBe('client-key');
+      } finally {
+        removeDirRecursive(tmpDir);
+      }
+    });
+
+    test('sends Cookie header and no Authorization header when authType is cookie', () => {
+      const cookieClient = new ConfluenceClient({
+        domain: 'confluence.company.com',
+        authType: 'cookie',
+        cookie: 'JSESSIONID=abc123xyz',
+        apiPath: '/rest/api'
+      });
+
+      expect(cookieClient.authType).toBe('cookie');
+      expect(cookieClient.client.defaults.headers.Authorization).toBeUndefined();
+      expect(cookieClient.client.defaults.headers.Cookie).toBe('JSESSIONID=abc123xyz');
+    });
+
+    test('buildAuthHeader returns null for cookie auth', () => {
+      const cookieClient = new ConfluenceClient({
+        domain: 'confluence.company.com',
+        authType: 'cookie',
+        cookie: 'JSESSIONID=abc123xyz'
+      });
+
+      expect(cookieClient.buildAuthHeader()).toBeNull();
+    });
+
+    test('buildAuthHeaders returns only Cookie for cookie auth', () => {
+      const cookieClient = new ConfluenceClient({
+        domain: 'confluence.company.com',
+        authType: 'cookie',
+        cookie: 'a=1; b=2'
+      });
+
+      expect(cookieClient.buildAuthHeaders()).toEqual({ Cookie: 'a=1; b=2' });
+    });
+
+    test('supports multiple cookies in Cookie header', () => {
+      const cookieClient = new ConfluenceClient({
+        domain: 'confluence.company.com',
+        authType: 'cookie',
+        cookie: 'JSESSIONID=abc; XSRF-TOKEN=xyz'
+      });
+
+      expect(cookieClient.client.defaults.headers.Cookie).toBe('JSESSIONID=abc; XSRF-TOKEN=xyz');
+    });
+
+    test('sends no Authorization or Cookie header when authType is none', () => {
+      const noneClient = new ConfluenceClient({
+        domain: 'confluence.internal',
+        authType: 'none',
+        apiPath: '/rest/api'
+      });
+
+      expect(noneClient.authType).toBe('none');
+      expect(noneClient.client.defaults.headers.Authorization).toBeUndefined();
+      expect(noneClient.client.defaults.headers.Cookie).toBeUndefined();
+    });
+
+    test('buildAuthHeader returns null for none auth', () => {
+      const noneClient = new ConfluenceClient({
+        domain: 'confluence.internal',
+        authType: 'none'
+      });
+
+      expect(noneClient.buildAuthHeader()).toBeNull();
+      expect(noneClient.buildAuthHeaders()).toEqual({});
+    });
+  });
+
+  describe('401 error handling (cookie auth)', () => {
+    test('provides cookie-specific hints for cookie auth', async () => {
+      const cookieClient = new ConfluenceClient({
+        domain: 'confluence.company.com',
+        authType: 'cookie',
+        cookie: 'JSESSIONID=expired',
+        apiPath: '/rest/api'
+      });
+      const mock = new MockAdapter(cookieClient.client);
+      mock.onGet(/\/content\/123/).reply(401);
+
+      await expect(cookieClient.readPage('123')).rejects.toThrow(/cookie is valid and not expired/);
+      await expect(cookieClient.readPage('123')).rejects.toThrow(/Enterprise SSO/);
+      mock.restore();
+    });
+  });
+
+  describe('401 error handling (none auth)', () => {
+    test('provides reverse-proxy hint for none auth', async () => {
+      const noneClient = new ConfluenceClient({
+        domain: 'confluence.internal',
+        authType: 'none',
+        apiPath: '/rest/api'
+      });
+      const mock = new MockAdapter(noneClient.client);
+      mock.onGet(/\/content\/123/).reply(401);
+
+      await expect(noneClient.readPage('123')).rejects.toThrow(/reverse proxy/);
+      mock.restore();
+    });
+  });
+
+  describe('401 error handling', () => {
+    test('provides scoped token hints when using api.atlassian.com', async () => {
+      const scopedClient = new ConfluenceClient({
+        domain: 'api.atlassian.com',
+        token: 'scoped-token',
+        authType: 'basic',
+        email: 'user@example.com',
+        apiPath: '/ex/confluence/cloud-id/wiki/rest/api'
+      });
+      const mock = new MockAdapter(scopedClient.client);
+      mock.onGet(/\/content\/123/).reply(401);
+
+      await expect(scopedClient.readPage('123')).rejects.toThrow(/scoped API token/);
+      await expect(scopedClient.readPage('123')).rejects.toThrow(/read:confluence-content\.all/);
+      mock.restore();
+    });
+
+    test('provides bearer/PAT hints for bearer token auth', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet(/\/content\/123/).reply(401);
+
+      await expect(client.readPage('123')).rejects.toThrow(/Authentication failed/);
+      await expect(client.readPage('123')).rejects.toThrow(/verify your personal access token/);
+      mock.restore();
+    });
+
+    test('provides basic auth hints when using basic auth on cloud', async () => {
+      const basicClient = new ConfluenceClient({
+        domain: 'test.atlassian.net',
+        token: 'api-token',
+        authType: 'basic',
+        email: 'user@example.com'
+      });
+      const mock = new MockAdapter(basicClient.client);
+      mock.onGet(/\/content\/123/).reply(401);
+
+      await expect(basicClient.readPage('123')).rejects.toThrow(/verify your email and API token/);
+      mock.restore();
+    });
+
+    test('provides server/DC hints when using basic auth on non-cloud', async () => {
+      const dcClient = new ConfluenceClient({
+        domain: 'confluence.mycompany.com',
+        token: 'password',
+        authType: 'basic',
+        email: 'admin'
+      });
+      const mock = new MockAdapter(dcClient.client);
+      mock.onGet(/\/content\/123/).reply(401);
+
+      await expect(dcClient.readPage('123')).rejects.toThrow(/verify your username and password/);
+      mock.restore();
+    });
+
+    test('provides certificate hints for mtls auth', async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'confluence-mtls-'));
+      const certPath = path.join(tmpDir, 'client.pem');
+      const keyPath = path.join(tmpDir, 'client.key');
+      fs.writeFileSync(certPath, 'client-cert');
+      fs.writeFileSync(keyPath, 'client-key');
+
+      try {
+        const mtlsClient = new ConfluenceClient({
+          domain: 'api.collaborate.akamai.com',
+          authType: 'mtls',
+          apiPath: '/confluence/rest/api',
+          mtls: {
+            clientCert: certPath,
+            clientKey: keyPath,
+          }
+        });
+        const mock = new MockAdapter(mtlsClient.client);
+        mock.onGet(/\/content\/123/).reply(401);
+
+        await expect(mtlsClient.readPage('123')).rejects.toThrow(/client certificate/);
+        mock.restore();
+      } finally {
+        removeDirRecursive(tmpDir);
+      }
+    });
+  });
+
+  describe('page metadata and storage reads', () => {
+    test('readPage should return storage content when format is storage', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content/123').reply(200, {
+        body: {
+          storage: {
+            value: '<p>Storage body</p>'
+          }
+        }
+      });
+
+      await expect(client.readPage('123', 'storage')).resolves.toBe('<p>Storage body</p>');
+
+      mock.restore();
+    });
+
+    test('getPageInfo should normalize machine-readable metadata', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content/123').reply(config => {
+        expect(config.params.expand).toContain('space');
+        expect(config.params.expand).toContain('history');
+        expect(config.params.expand).toContain('version');
+        expect(config.params.expand).toContain('ancestors');
+        return [200, {
+          id: '123',
+          title: 'Architecture Overview',
+          type: 'page',
+          status: 'current',
+          space: { key: 'ENG', name: 'Engineering' },
+          history: {
+            createdBy: { displayName: 'Ada Lovelace', accountId: 'acct-1' },
+            createdDate: '2025-01-01T10:00:00.000Z'
+          },
+          version: {
+            number: 7,
+            when: '2025-01-02T12:00:00.000Z',
+            by: { displayName: 'Grace Hopper', accountId: 'acct-2' }
+          },
+          ancestors: [
+            { id: '100', type: 'page', title: 'Parent Page' }
+          ],
+          _links: {
+            webui: '/spaces/ENG/pages/123/Architecture+Overview'
+          }
+        }];
+      });
+
+      const info = await client.getPageInfo('123');
+      expect(info).toMatchObject({
+        id: '123',
+        title: 'Architecture Overview',
+        type: 'page',
+        status: 'current',
+        spaceKey: 'ENG',
+        parentId: '100',
+        version: 7,
+        url: 'https://test.atlassian.net/spaces/ENG/pages/123/Architecture+Overview',
+        createdAt: '2025-01-01T10:00:00.000Z',
+        updatedAt: '2025-01-02T12:00:00.000Z',
+        ancestors: [{ id: '100', type: 'page', title: 'Parent Page' }],
+        author: { displayName: 'Ada Lovelace', accountId: 'acct-1' },
+        lastUpdatedBy: { displayName: 'Grace Hopper', accountId: 'acct-2' }
+      });
+      expect(info.space).toEqual({ key: 'ENG', name: 'Engineering' });
+
+      mock.restore();
+    });
+
+    test('getPageInfo should normalize space to a stable shape', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content/321').reply(200, {
+        id: '321',
+        title: 'Runbook',
+        type: 'page',
+        status: 'current',
+        space: {
+          key: 'OPS',
+          name: 'Operations',
+          id: 42,
+          type: 'global',
+          metadata: { labels: ['internal'] }
+        },
+        version: { number: 1 },
+        ancestors: []
+      });
+
+      const info = await client.getPageInfo('321');
+      expect(info.space).toEqual({ key: 'OPS', name: 'Operations' });
+
+      mock.restore();
+    });
+
+    test('normalizePage should prefer _links.base for scoped token browser URLs', () => {
+      const scopedClient = new ConfluenceClient({
+        domain: 'api.atlassian.com',
+        email: 'user@example.com',
+        token: 'scoped-token',
+        apiPath: '/ex/confluence/cloud-id/wiki/rest/api'
+      });
+
+      const info = scopedClient.normalizePage({
+        id: '123',
+        title: 'Architecture Overview',
+        type: 'page',
+        status: 'current',
+        space: { key: 'ENG', name: 'Engineering' },
+        _links: {
+          base: 'https://tenant.atlassian.net/wiki',
+          webui: '/spaces/ENG/pages/123/Architecture+Overview'
+        }
+      });
+
+      expect(info.url).toBe('https://tenant.atlassian.net/wiki/spaces/ENG/pages/123/Architecture+Overview');
+    });
+
+    test('getPageInfo should handle missing parent cleanly', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content/555').reply(200, {
+        id: '555',
+        title: 'Root Page',
+        type: 'page',
+        status: 'current',
+        space: { key: 'ROOT', name: 'Root Space' },
+        version: { number: 1 },
+        ancestors: [],
+        _links: {}
+      });
+
+      const info = await client.getPageInfo('555');
+      expect(info.parentId).toBeNull();
+      expect(info.ancestors).toEqual([]);
+      expect(info.url).toBe('https://test.atlassian.net/spaces/ROOT/pages/555');
+
+      mock.restore();
+    });
+
+    test('getChildPages should include structured metadata for JSON output', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content/123/child/page').reply(config => {
+        expect(config.params.expand).toBe('space,version');
+        return [200, {
+          results: [
+            {
+              id: '200',
+              title: 'Child Page',
+              type: 'page',
+              status: 'current',
+              space: { key: 'ENG', name: 'Engineering' },
+              version: { number: 4 },
+              ancestors: [{ id: '123', type: 'page', title: 'Parent Page' }],
+              _links: { webui: '/spaces/ENG/pages/200/Child+Page' }
+            }
+          ]
+        }];
+      });
+
+      const pages = await client.getChildPages('123');
+      expect(pages).toEqual([expect.objectContaining({
+        id: '200',
+        title: 'Child Page',
+        type: 'page',
+        status: 'current',
+        spaceKey: 'ENG',
+        parentId: '123',
+        version: 4,
+        url: 'https://test.atlassian.net/spaces/ENG/pages/200/Child+Page'
+      })]);
+
+      mock.restore();
+    });
+
+    test('getChildPages should fetch ancestors only when requested', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content/123/child/page').reply(config => {
+        expect(config.params.expand).toBe('space,version,ancestors');
+        return [200, {
+          results: [
+            {
+              id: '200',
+              title: 'Child Page',
+              type: 'page',
+              status: 'current',
+              space: { key: 'ENG', name: 'Engineering' },
+              version: { number: 4 },
+              ancestors: [{ id: '123', type: 'page', title: 'Parent Page' }],
+              _links: { webui: '/spaces/ENG/pages/200/Child+Page' }
+            }
+          ]
+        }];
+      });
+
+      const pages = await client.getChildPages('123', 500, { includeAncestors: true });
+      expect(pages[0].ancestors).toEqual([{ id: '123', type: 'page', title: 'Parent Page' }]);
+
+      mock.restore();
     });
   });
 
@@ -166,6 +725,30 @@ describe('ConfluenceClient', () => {
 
       mock.restore();
     });
+
+    test('should resolve tiny links via redirect', async () => {
+      const mock = new MockAdapter(client.client);
+
+      mock.onGet(/\/wiki\/x\//).reply(302, null, {
+        location: 'https://test.atlassian.net/wiki/spaces/TEST/pages/123456789/Page+Title'
+      });
+
+      const tinyUrl = 'https://test.atlassian.net/wiki/x/aBcDeFg';
+      expect(await client.extractPageId(tinyUrl)).toBe('123456789');
+
+      mock.restore();
+    });
+
+    test('should throw error when tiny link cannot be resolved', async () => {
+      const mock = new MockAdapter(client.client);
+
+      mock.onGet(/\/wiki\/x\//).reply(404);
+
+      const tinyUrl = 'https://test.atlassian.net/wiki/x/invalidCode';
+      await expect(client.extractPageId(tinyUrl)).rejects.toThrow(/Could not resolve page ID from tiny link/);
+
+      mock.restore();
+    });
   });
 
   describe('markdownToStorage', () => {
@@ -184,7 +767,7 @@ describe('ConfluenceClient', () => {
       
       expect(result).toContain('<ac:structured-macro ac:name="code">');
       expect(result).toContain('<ac:parameter ac:name="language">javascript</ac:parameter>');
-      expect(result).toContain('console.log(&quot;Hello World&quot;);');
+      expect(result).toContain('console.log("Hello World");');
     });
 
     test('should convert lists to native Confluence format', () => {
@@ -214,13 +797,99 @@ describe('ConfluenceClient', () => {
       expect(result).toContain('<td><p>Cell 1</p></td>');
     });
 
-    test('should convert links to Confluence link format', () => {
+    test('should escape CDATA terminators in code blocks', () => {
+      const markdown = '```xml\n<![CDATA[some data]]>\n```';
+      const result = client.markdownToStorage(markdown);
+
+      expect(result).toContain('<![CDATA[');
+      expect(result).toContain(']]]]><![CDATA[>');
+      // The literal ]]> from user code should not appear unescaped
+      expect(result).not.toContain('some data]]>');
+    });
+
+    test('should convert links to smart link format on Cloud instances', () => {
       const markdown = '[Example Link](https://example.com)';
       const result = client.markdownToStorage(markdown);
-      
+
+      expect(result).toContain('<a href="https://example.com" data-card-appearance="inline">Example Link</a>');
+      expect(result).not.toContain('<ac:link>');
+    });
+
+    test('should convert links to ac:link format on Server/Data Center instances', () => {
+      const serverClient = new ConfluenceClient({
+        domain: 'confluence.example.com',
+        token: 'test-token'
+      });
+      const markdown = '[Example Link](https://example.com)';
+      const result = serverClient.markdownToStorage(markdown);
+
       expect(result).toContain('<ac:link>');
       expect(result).toContain('ri:value="https://example.com"');
       expect(result).toContain('Example Link');
+      expect(result).not.toContain('data-card-appearance');
+    });
+
+    test('should convert links to smart link format when forceCloud is set on a custom domain', () => {
+      const customDomainClient = new ConfluenceClient({
+        domain: 'wiki.example.org',
+        token: 'test-token',
+        forceCloud: true
+      });
+      const markdown = '[Example Link](https://example.com)';
+      const result = customDomainClient.markdownToStorage(markdown);
+
+      expect(result).toContain('<a href="https://example.com" data-card-appearance="inline">Example Link</a>');
+      expect(result).not.toContain('<ac:link>');
+    });
+
+    test('explicit linkStyle on the client flows through to storage output', () => {
+      // Converter-level semantics are covered in tests/macro-converter.test.js.
+      // This just confirms the ConfluenceClient constructor plumbs linkStyle through.
+      const client = new ConfluenceClient({
+        domain: 'wiki.example.org',
+        token: 'test-token',
+        forceCloud: true,
+        linkStyle: 'plain'
+      });
+      const result = client.markdownToStorage('[Link](https://example.com)');
+      expect(result).toContain('<a href="https://example.com">Link</a>');
+      expect(result).not.toContain('data-card-appearance');
+    });
+  });
+
+  describe('forceCloud', () => {
+    test('isCloud returns false for custom domains without forceCloud', () => {
+      const customClient = new ConfluenceClient({
+        domain: 'wiki.example.org',
+        token: 'test-token'
+      });
+      expect(customClient.isCloud()).toBe(false);
+    });
+
+    test('isCloud returns true for custom domains with forceCloud', () => {
+      const customClient = new ConfluenceClient({
+        domain: 'wiki.example.org',
+        token: 'test-token',
+        forceCloud: true
+      });
+      expect(customClient.isCloud()).toBe(true);
+    });
+
+    test('isCloud returns true for atlassian.net domains without forceCloud', () => {
+      const cloudClient = new ConfluenceClient({
+        domain: 'company.atlassian.net',
+        token: 'test-token'
+      });
+      expect(cloudClient.isCloud()).toBe(true);
+    });
+
+    test('forceCloud defaults to false when not specified', () => {
+      const defaultClient = new ConfluenceClient({
+        domain: 'example.com',
+        token: 'test-token'
+      });
+      expect(defaultClient.forceCloud).toBe(false);
+      expect(defaultClient.isCloud()).toBe(false);
     });
   });
 
@@ -253,25 +922,96 @@ describe('ConfluenceClient', () => {
     test('should convert Confluence code macro to markdown', () => {
       const storage = '<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">javascript</ac:parameter><ac:plain-text-body><![CDATA[console.log("Hello");]]></ac:plain-text-body></ac:structured-macro>';
       const result = client.storageToMarkdown(storage);
-      
+
       expect(result).toContain('```javascript');
       expect(result).toContain('console.log("Hello");');
       expect(result).toContain('```');
     });
 
+    test('should separate code block (with language) from surrounding content with blank lines', () => {
+      const storage = '<p>Intro</p><ac:structured-macro ac:name="code"><ac:parameter ac:name="language">python</ac:parameter><ac:plain-text-body><![CDATA[print("hi")]]></ac:plain-text-body></ac:structured-macro><p>Outro</p>';
+      const result = client.storageToMarkdown(storage);
+      expect(result).toMatch(/Intro\n\n/);
+      expect(result).toMatch(/\n\n```python\n/);
+      expect(result).toMatch(/\n```\n\n/);
+      expect(result).toMatch(/\n\nOutro/);
+    });
+
+    test('should separate code block (no language) from surrounding content with blank lines', () => {
+      const storage = '<p>Before</p><ac:structured-macro ac:name="code"><ac:plain-text-body><![CDATA[raw code]]></ac:plain-text-body></ac:structured-macro><p>After</p>';
+      const result = client.storageToMarkdown(storage);
+      expect(result).toMatch(/Before\n\n/);
+      expect(result).toMatch(/\n\n```\n/);
+      expect(result).toMatch(/\n```\n\n/);
+      expect(result).toMatch(/\n\nAfter/);
+    });
+
+    test('should separate mermaid macro from surrounding content with blank lines', () => {
+      const storage = '<p>Diagram:</p><ac:structured-macro ac:name="mermaid-macro"><ac:plain-text-body><![CDATA[graph TD; A-->B]]></ac:plain-text-body></ac:structured-macro><p>End</p>';
+      const result = client.storageToMarkdown(storage);
+      expect(result).toMatch(/Diagram:\n\n/);
+      expect(result).toMatch(/\n\n```mermaid\n/);
+      expect(result).toMatch(/\n```\n\n/);
+      expect(result).toMatch(/\n\nEnd/);
+    });
+
+    test('complex page: heading, multi-line paragraph, code block, ordered list', () => {
+      const storage = [
+        '<h1>Deployment Guide</h1>',
+        '<p>Deploy using the following steps.\nEnsure prerequisites are met.</p>',
+        '<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">bash</ac:parameter><ac:plain-text-body><![CDATA[git pull origin main\nnpm run build]]></ac:plain-text-body></ac:structured-macro>',
+        '<p>Then verify:</p>',
+        '<ol><li>Check logs</li><li>Run smoke tests</li></ol>',
+        '<p>Deployment complete.</p>'
+      ].join('');
+      const result = client.storageToMarkdown(storage);
+      expect(result).toBe(
+        '# Deployment Guide\n\n' +
+        'Deploy using the following steps.\nEnsure prerequisites are met.\n\n' +
+        '```bash\ngit pull origin main\nnpm run build\n```\n\n' +
+        'Then verify:\n\n' +
+        '1. Check logs\n2. Run smoke tests\n\n' +
+        'Deployment complete.'
+      );
+    });
+
     test('should convert Confluence macros to admonitions', () => {
       const storage = '<ac:structured-macro ac:name="info"><ac:rich-text-body><p>This is info</p></ac:rich-text-body></ac:structured-macro>';
       const result = client.storageToMarkdown(storage);
-      
-      expect(result).toContain('[!info]');
-      expect(result).toContain('This is info');
+
+      expect(result).toContain('> **INFO**');
+      expect(result).toContain('> This is info');
     });
 
     test('should convert Confluence links to markdown', () => {
       const storage = '<ac:link><ri:url ri:value="https://example.com" /><ac:plain-text-link-body><![CDATA[Example]]></ac:plain-text-link-body></ac:link>';
       const result = client.storageToMarkdown(storage);
-      
+
       expect(result).toContain('[Example](https://example.com)');
+    });
+
+    test('should convert internal page links to markdown', () => {
+      const storage = '<ac:link><ri:page ri:space-key="DEV" ri:content-title="Page Title" /></ac:link>';
+      const result = client.storageToMarkdown(storage);
+      expect(result).toContain('[Page Title]');
+    });
+
+    test('should preserve display text from internal page links with ac:link-body', () => {
+      const storage = '<ac:link><ri:page ri:content-title="Some Long Page Title" ri:version-at-save="28" /><ac:link-body>Short Name</ac:link-body></ac:link>';
+      const result = client.storageToMarkdown(storage);
+      expect(result).toContain('Short Name');
+    });
+
+    test('should remove ac:link tags with attributes', () => {
+      const storage = '<p>Before</p><ac:link ac:anchor="section"><ri:page ri:content-title="Page" /></ac:link><p>After</p>';
+      const result = client.storageToMarkdown(storage);
+      expect(result).not.toContain('ac:link');
+    });
+
+    test('should preserve internal link text in table cells', () => {
+      const storage = '<table><tr><th><p>Name</p></th></tr><tr><td><p><ac:link><ri:page ri:content-title="Long Title" /><ac:link-body>Display</ac:link-body></ac:link></p></td></tr></table>';
+      const result = client.storageToMarkdown(storage);
+      expect(result).toContain('Display');
     });
   });
 
@@ -300,6 +1040,74 @@ describe('ConfluenceClient', () => {
       expect(result).toContain('| Header |');
       expect(result).toContain('| --- |');
       expect(result).toContain('| Cell |');
+    });
+
+    test('should preserve content of multi-line paragraphs', () => {
+      // Without the dotAll flag on the <p> regex, content with embedded newlines is silently dropped
+      const html = '<p>First line\nSecond line</p>';
+      const result = client.htmlToMarkdown(html);
+      expect(result).toContain('First line');
+      expect(result).toContain('Second line');
+    });
+
+    test('should separate consecutive paragraphs with a blank line', () => {
+      const html = '<p>Alpha</p><p>Beta</p>';
+      const result = client.htmlToMarkdown(html);
+      expect(result).toMatch(/Alpha\n\nBeta/);
+    });
+
+    test('should separate lists from surrounding content with blank lines', () => {
+      const html = '<p>Intro</p><ul><li>Item A</li><li>Item B</li></ul><p>Outro</p>';
+      const result = client.htmlToMarkdown(html);
+      expect(result).toMatch(/Intro\n\n/);
+      expect(result).toMatch(/\n\n- Item A\n- Item B\n\n/);
+      expect(result).toMatch(/\n\nOutro/);
+    });
+
+    test('should separate ordered lists from surrounding content with blank lines', () => {
+      const html = '<p>Steps:</p><ol><li>First</li><li>Second</li></ol><p>Done</p>';
+      const result = client.htmlToMarkdown(html);
+      expect(result).toMatch(/Steps:\n\n/);
+      expect(result).toMatch(/\n\n1\. First\n2\. Second\n\n/);
+      expect(result).toMatch(/\n\nDone/);
+    });
+
+    test('should separate tables from surrounding content with blank lines', () => {
+      const html = '<p>See table:</p><table><tr><th>Col</th></tr><tr><td>Val</td></tr></table><p>End</p>';
+      const result = client.htmlToMarkdown(html);
+      expect(result).toMatch(/See table:\n\n/);
+      expect(result).toMatch(/\| Col \|/);
+      expect(result).toMatch(/\n\nEnd/);
+    });
+
+    test('complex page: heading, multi-line paragraph, table, list', () => {
+      const html = [
+        '<h2>API Reference</h2>',
+        '<p>The following endpoints are available.\nAll requests require authentication.</p>',
+        '<table><tr><th>Method</th><th>Path</th></tr><tr><td>GET</td><td>/users</td></tr><tr><td>POST</td><td>/users</td></tr></table>',
+        '<p>Authentication options:</p>',
+        '<ul><li>Bearer token</li><li>API key</li></ul>',
+        '<p>See docs for details.</p>'
+      ].join('');
+      const result = client.htmlToMarkdown(html);
+      expect(result).toBe(
+        '## API Reference\n\n' +
+        'The following endpoints are available.\nAll requests require authentication.\n\n' +
+        '| Method | Path |\n| --- | --- |\n| GET | /users |\n| POST | /users |\n\n' +
+        'Authentication options:\n\n' +
+        '- Bearer token\n- API key\n\n' +
+        'See docs for details.'
+      );
+    });
+
+    test('should convert named characters correctly', () => {
+      const NAMED_ENTITIES = ConfluenceClient.NAMED_ENTITIES;
+
+      for (const [entity, char] of Object.entries(NAMED_ENTITIES)) {
+        const html = `<p>Character: &${entity};</p>`;
+        const result = client.htmlToMarkdown(html);
+        expect(result).toContain(`Character: ${char}`);
+      }
     });
   });
 
@@ -363,6 +1171,326 @@ describe('ConfluenceClient', () => {
 
       mock.restore();
     });
+
+    test('should respect start parameter', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/search').reply((config) => {
+        expect(config.params.start).toBe(20);
+        return [200, { results: [] }];
+      });
+
+      await client.search('test', 10, false, 20);
+
+      mock.restore();
+    });
+
+    test('should escape backslashes before double quotes', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/search').reply((config) => {
+        expect(config.params.cql).toBe('text ~ "back\\\\slash \\"mix\\""');
+        return [200, { results: [] }];
+      });
+
+      await client.search('back\\slash "mix"');
+      mock.restore();
+    });
+
+    test('should preserve wildcards in text search (not over-escape)', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/search').reply((config) => {
+        expect(config.params.cql).toBe('text ~ "foo* ba?"');
+        return [200, { results: [] }];
+      });
+
+      await client.search('foo* ba?');
+      mock.restore();
+    });
+
+    test('should neutralize CQL injection attempting to break out of the literal', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/search').reply((config) => {
+        // The closing quote and injected OR clause must be escaped so the
+        // attacker's payload stays inside the text literal.
+        expect(config.params.cql).toBe('text ~ "x\\" OR title = \\"admin"');
+        return [200, { results: [] }];
+      });
+
+      await client.search('x" OR title = "admin');
+      mock.restore();
+    });
+  });
+
+  describe('getSpaces', () => {
+    test('should request a single page with default page size of 500 when no _links.next', async () => {
+      const mock = new MockAdapter(client.client);
+      const calls = [];
+      mock.onGet('/space').reply(config => {
+        calls.push({ ...config.params });
+        return [200, {
+          results: [{ key: 'A', name: 'Alpha', type: 'global' }],
+          _links: {}
+        }];
+      });
+
+      const spaces = await client.getSpaces();
+      expect(calls).toHaveLength(1);
+      expect(calls[0].limit).toBe(500);
+      expect(calls[0].start).toBe(0);
+      expect(spaces).toEqual([{ key: 'A', name: 'Alpha', type: 'global' }]);
+      mock.restore();
+    });
+
+    test('should follow _links.next and aggregate results across pages', async () => {
+      const mock = new MockAdapter(client.client);
+      const calls = [];
+      mock.onGet('/space').reply(config => {
+        calls.push({ ...config.params });
+        if (config.params.start === 0) {
+          return [200, {
+            results: [{ key: 'A', name: 'Alpha', type: 'global' }],
+            _links: { next: '/rest/api/space?next=true&limit=500&start=500' }
+          }];
+        }
+        if (config.params.start === 500) {
+          return [200, {
+            results: [{ key: 'B', name: 'Beta', type: 'global' }],
+            _links: { next: '/rest/api/space?next=true&limit=500&start=1000' }
+          }];
+        }
+        return [200, {
+          results: [{ key: 'C', name: 'Gamma', type: 'global' }],
+          _links: {}
+        }];
+      });
+
+      const spaces = await client.getSpaces(null);
+      expect(calls.map(c => c.start)).toEqual([0, 500, 1000]);
+      expect(calls.map(c => c.limit)).toEqual([500, 500, 500]);
+      expect(spaces.map(s => s.key)).toEqual(['A', 'B', 'C']);
+      mock.restore();
+    });
+
+    test('should send limit equal to maxResults when smaller than the page size', async () => {
+      const mock = new MockAdapter(client.client);
+      const calls = [];
+      mock.onGet('/space').reply(config => {
+        calls.push({ ...config.params });
+        return [200, {
+          results: [{ key: 'A', name: 'Alpha', type: 'global' }],
+          _links: {}
+        }];
+      });
+
+      await client.getSpaces(1);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].limit).toBe(1);
+      mock.restore();
+    });
+
+    test('should shrink the page request size to the remaining cap on each iteration', async () => {
+      const mock = new MockAdapter(client.client);
+      const calls = [];
+      mock.onGet('/space').reply(config => {
+        calls.push({ ...config.params });
+        if (config.params.start === 0) {
+          return [200, {
+            results: Array.from({ length: 500 }, (_, i) => ({
+              key: `K${i}`, name: `N${i}`, type: 'global'
+            })),
+            _links: { next: '/rest/api/space?next=true&limit=500&start=500' }
+          }];
+        }
+        return [200, {
+          results: Array.from({ length: 250 }, (_, i) => ({
+            key: `K${500 + i}`, name: `N${500 + i}`, type: 'global'
+          })),
+          _links: {}
+        }];
+      });
+
+      const spaces = await client.getSpaces(750);
+      expect(calls).toHaveLength(2);
+      expect(calls[0].limit).toBe(500);
+      expect(calls[1].limit).toBe(250);
+      expect(spaces).toHaveLength(750);
+      mock.restore();
+    });
+
+    test('should stop paginating once maxResults cap is reached and slice excess', async () => {
+      const mock = new MockAdapter(client.client);
+      const calls = [];
+      mock.onGet('/space').reply(config => {
+        calls.push({ ...config.params });
+        if (config.params.start === 0) {
+          return [200, {
+            results: [
+              { key: 'A', name: 'Alpha', type: 'global' },
+              { key: 'B', name: 'Beta', type: 'global' }
+            ],
+            _links: { next: '/rest/api/space?next=true&limit=500&start=500' }
+          }];
+        }
+        return [200, {
+          results: [
+            { key: 'C', name: 'Gamma', type: 'global' },
+            { key: 'D', name: 'Delta', type: 'global' }
+          ],
+          _links: { next: '/rest/api/space?next=true&limit=500&start=1000' }
+        }];
+      });
+
+      const spaces = await client.getSpaces(3);
+      expect(calls).toHaveLength(2);
+      expect(calls[0].limit).toBe(3);
+      expect(calls[1].limit).toBe(1);
+      expect(spaces.map(s => s.key)).toEqual(['A', 'B', 'C']);
+      mock.restore();
+    });
+  });
+
+  describe('listSpaces', () => {
+    test('returns nextStart parsed from _links.next', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/space').reply(200, {
+        results: [{ key: 'A', name: 'Alpha', type: 'global' }],
+        _links: { next: '/rest/api/space?next=true&limit=500&start=500' }
+      });
+
+      const page = await client.listSpaces({ limit: 500, start: 0 });
+      expect(page.results).toEqual([{ key: 'A', name: 'Alpha', type: 'global' }]);
+      expect(page.nextStart).toBe(500);
+      mock.restore();
+    });
+
+    test('returns null nextStart when there is no next link', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/space').reply(200, { results: [], _links: {} });
+
+      const page = await client.listSpaces();
+      expect(page.results).toEqual([]);
+      expect(page.nextStart).toBeNull();
+      mock.restore();
+    });
+  });
+
+  describe('escapeCql', () => {
+    test('escapes backslash and double quote', () => {
+      expect(client.escapeCql('a"b')).toBe('a\\"b');
+      expect(client.escapeCql('a\\b')).toBe('a\\\\b');
+    });
+
+    test('escapes backslashes before quotes so a quote cannot smuggle in', () => {
+      expect(client.escapeCql('\\"')).toBe('\\\\\\"');
+    });
+
+    test('leaves wildcard and fuzzy operators alone', () => {
+      expect(client.escapeCql('foo*bar?baz~')).toBe('foo*bar?baz~');
+    });
+
+    test('returns empty string for non-string input', () => {
+      expect(client.escapeCql(null)).toBe('');
+      expect(client.escapeCql(undefined)).toBe('');
+      expect(client.escapeCql(42)).toBe('');
+    });
+  });
+
+  describe('findPageByTitle', () => {
+    test('escapes the title inside the CQL literal', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/search').reply((config) => {
+        expect(config.params.cql).toBe('title = "it\\\\\\"s"');
+        return [200, {
+          results: [{
+            content: { id: '1', title: 'it\\"s', type: 'page', space: { key: 'X', name: 'X' } }
+          }]
+        }];
+      });
+
+      await client.findPageByTitle('it\\"s');
+      mock.restore();
+    });
+
+    test('escapes spaceKey when provided', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/search').reply((config) => {
+        expect(config.params.cql).toBe('title = "Home" AND space = "A\\"B"');
+        return [200, {
+          results: [{
+            content: { id: '1', title: 'Home', type: 'page', space: { key: 'A"B', name: 'X' } }
+          }]
+        }];
+      });
+
+      await client.findPageByTitle('Home', 'A"B');
+      mock.restore();
+    });
+  });
+
+  describe('resolveUserKeysInHtml', () => {
+    test('should replace ri:user link with @displayName', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/user').reply(200, { displayName: 'Jane Doe', username: 'jdoe' });
+
+      const html = '<p>cc <ac:link><ri:user ri:userkey="abc123" /></ac:link></p>';
+      const { html: resolved, userMap } = await client.resolveUserKeysInHtml(html);
+
+      expect(resolved).toBe('<p>cc @Jane Doe</p>');
+      expect(userMap.get('abc123')).toBe('Jane Doe');
+
+      mock.restore();
+    });
+
+    test('should handle userkey containing regex metacharacters', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/user').reply(200, { displayName: 'Jane Doe', username: 'jdoe' });
+
+      const html = '<p><ac:link><ri:user ri:userkey="a.b+c*d" /></ac:link></p>';
+      const { html: resolved } = await client.resolveUserKeysInHtml(html);
+
+      expect(resolved).toBe('<p>@Jane Doe</p>');
+
+      mock.restore();
+    });
+
+    test('should not interpret $ in displayName as replacement pattern', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/user').reply(200, { displayName: '$1 money $$', username: 'user' });
+
+      const html = '<p><ac:link><ri:user ri:userkey="xyz" /></ac:link></p>';
+      const { html: resolved } = await client.resolveUserKeysInHtml(html);
+
+      expect(resolved).toBe('<p>@$1 money $$</p>');
+
+      mock.restore();
+    });
+
+    test('should return html unchanged when no userkeys present', async () => {
+      const html = '<p>plain content</p>';
+      const { html: resolved, userMap } = await client.resolveUserKeysInHtml(html);
+
+      expect(resolved).toBe(html);
+      expect(userMap.size).toBe(0);
+    });
+
+    test('should isolate per-key failures: one rejection does not drop other resolutions', async () => {
+      const spy = jest.spyOn(client, 'getUserByKey').mockImplementation(async (key) => {
+        if (key === 'good') {
+          return { key, displayName: 'Good User', username: 'good' };
+        }
+        throw new Error('synthetic failure');
+      });
+
+      const html =
+        '<p><ac:link><ri:user ri:userkey="good" /></ac:link> and ' +
+        '<ac:link><ri:user ri:userkey="bad" /></ac:link></p>';
+      const { html: resolved, userMap } = await client.resolveUserKeysInHtml(html);
+
+      expect(resolved).toBe('<p>@Good User and @bad</p>');
+      expect(userMap.get('good')).toBe('Good User');
+      expect(userMap.get('bad')).toBe('bad');
+
+      spy.mockRestore();
+    });
   });
 
   describe('page creation and updates', () => {
@@ -373,6 +1501,156 @@ describe('ConfluenceClient', () => {
       expect(typeof client.createChildPage).toBe('function');
       expect(typeof client.findPageByTitle).toBe('function');
       expect(typeof client.deletePage).toBe('function');
+      expect(typeof client.listVersions).toBe('function');
+      expect(typeof client.deleteVersion).toBe('function');
+      expect(typeof client.purgeNonCurrentVersions).toBe('function');
+    });
+
+    test('createPage should default to type "page"', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onPost('/content').reply(200, {
+        id: '111', title: 'Test', type: 'page',
+        space: { key: 'TEST', name: 'Test' },
+        _links: { webui: '/spaces/TEST/pages/111' }
+      });
+
+      await client.createPage('Test', 'TEST', '<p>Hello</p>');
+      const requestData = JSON.parse(mock.history.post[0].data);
+      expect(requestData.type).toBe('page');
+      expect(requestData.body).toBeDefined();
+      mock.restore();
+    });
+
+    test('createPage with format="auto" converts plain text to storage', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onPost('/content').reply(200, { id: '112' });
+      const spy = jest.spyOn(client, 'markdownToStorage').mockReturnValue('<p>Hello</p>');
+
+      await client.createPage('Test', 'TEST', 'Hello', 'auto');
+
+      expect(spy).toHaveBeenCalledWith('Hello');
+      const body = JSON.parse(mock.history.post[0].data).body.storage;
+      expect(body.value).toBe('<p>Hello</p>');
+      expect(body.representation).toBe('storage');
+
+      spy.mockRestore();
+      mock.restore();
+    });
+
+    test('createPage with format="auto" preserves markup-like storage content', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onPost('/content').reply(200, { id: '113' });
+      const spy = jest.spyOn(client, 'markdownToStorage');
+
+      await client.createPage('Test', 'TEST', '<p>Hello</p>', 'auto');
+
+      expect(spy).not.toHaveBeenCalled();
+      const body = JSON.parse(mock.history.post[0].data).body.storage;
+      expect(body.value).toBe('<p>Hello</p>');
+
+      spy.mockRestore();
+      mock.restore();
+    });
+
+    test('createPage should support type "folder" without body', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onPost('/content').reply(200, {
+        id: '222', title: 'My Folder', type: 'folder',
+        space: { key: 'TEST', name: 'Test' },
+        _links: { webui: '/spaces/TEST/pages/222' }
+      });
+
+      await client.createPage('My Folder', 'TEST', '', 'storage', 'folder');
+      const requestData = JSON.parse(mock.history.post[0].data);
+      expect(requestData.type).toBe('folder');
+      expect(requestData.body).toBeUndefined();
+      mock.restore();
+    });
+
+    test('createChildPage should support type "folder" without body', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onPost('/content').reply(200, {
+        id: '333', title: 'Child Folder', type: 'folder',
+        space: { key: 'TEST', name: 'Test' },
+        _links: { webui: '/spaces/TEST/pages/333' }
+      });
+
+      await client.createChildPage('Child Folder', 'TEST', '100', '', 'storage', 'folder');
+      const requestData = JSON.parse(mock.history.post[0].data);
+      expect(requestData.type).toBe('folder');
+      expect(requestData.ancestors).toEqual([{ id: '100' }]);
+      expect(requestData.body).toBeUndefined();
+      mock.restore();
+    });
+
+    test('createPage with format="html" routes through htmlToConfluenceStorage', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onPost('/content').reply(200, { id: '444' });
+      const spy = jest.spyOn(client, 'htmlToConfluenceStorage');
+
+      await client.createPage('T', 'TEST', '<p>x</p>', 'html');
+
+      expect(spy).toHaveBeenCalledWith('<p>x</p>');
+      const body = JSON.parse(mock.history.post[0].data).body.storage;
+      expect(body.representation).toBe('storage');
+      expect(body.value).toBe('<p>x</p>');
+
+      spy.mockRestore();
+      mock.restore();
+    });
+
+    test('createChildPage with format="html" routes through htmlToConfluenceStorage', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onPost('/content').reply(200, { id: '555' });
+      const spy = jest.spyOn(client, 'htmlToConfluenceStorage');
+
+      await client.createChildPage('T', 'TEST', '100', '<p>x</p>', 'html');
+
+      expect(spy).toHaveBeenCalledWith('<p>x</p>');
+      spy.mockRestore();
+      mock.restore();
+    });
+
+    test('updatePage with format="auto" converts plain text to storage', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content/123').reply(200, {
+        id: '123',
+        title: 'Old',
+        body: { storage: { value: '<p>Old</p>' } },
+        version: { number: 2 },
+        space: { key: 'TEST' }
+      });
+      mock.onPut('/content/123').reply(200, { id: '123' });
+      const spy = jest.spyOn(client, 'markdownToStorage').mockReturnValue('<p>New</p>');
+
+      await client.updatePage('123', null, 'New', 'auto');
+
+      expect(spy).toHaveBeenCalledWith('New');
+      const body = JSON.parse(mock.history.put[0].data).body.storage;
+      expect(body.value).toBe('<p>New</p>');
+
+      spy.mockRestore();
+      mock.restore();
+    });
+
+    test('createComment with format="auto" converts plain text to storage', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onPost('/content').reply(200, { id: 'c1' });
+      const spy = jest.spyOn(client, 'markdownToStorage').mockReturnValue('<p>Looks good</p>');
+
+      await client.createComment('123', 'Looks good', 'auto');
+
+      expect(spy).toHaveBeenCalledWith('Looks good');
+      const body = JSON.parse(mock.history.post[0].data).body.storage;
+      expect(body.value).toBe('<p>Looks good</p>');
+
+      spy.mockRestore();
+      mock.restore();
+    });
+
+    test('invalid write format throws a helpful error', () => {
+      expect(() => client.toStorageContent('Hello', 'wiki'))
+        .toThrow('Invalid content format "wiki". Valid: auto, storage, html, markdown');
     });
   });
 
@@ -393,6 +1671,204 @@ describe('ConfluenceClient', () => {
       await expect(
         client.deletePage('https://test.atlassian.net/wiki/viewpage.action?pageId=987654321')
       ).resolves.toEqual({ id: '987654321' });
+
+      mock.restore();
+    });
+  });
+
+  describe('listVersions', () => {
+    test('returns versions sorted ascending with author + message', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content/123/version').reply(200, {
+        results: [
+          { number: 3, when: '2026-04-01T00:00:00Z', by: { displayName: 'Alice' }, minorEdit: false, message: 'edit C' },
+          { number: 1, when: '2026-03-01T00:00:00Z', by: { displayName: 'Bob' }, minorEdit: true, message: '' },
+          { number: 2, when: '2026-03-15T00:00:00Z', by: { email: 'c@x.com' }, message: 'edit B' }
+        ]
+      });
+
+      const versions = await client.listVersions('123');
+      expect(versions.map(v => v.number)).toEqual([1, 2, 3]);
+      expect(versions[0].by).toBe('Bob');
+      expect(versions[1].by).toBe('c@x.com');
+      expect(versions[2].message).toBe('edit C');
+
+      mock.restore();
+    });
+
+    test('paginates over start/limit', async () => {
+      const mock = new MockAdapter(client.client);
+      const firstPage = Array.from({ length: 200 }, (_, i) => ({
+        number: i + 1, when: 't', by: { displayName: 'u' }
+      }));
+      const secondPage = [{ number: 201, when: 't', by: { displayName: 'u' } }];
+      mock.onGet('/content/123/version').replyOnce(200, { results: firstPage });
+      mock.onGet('/content/123/version').replyOnce(200, { results: secondPage });
+
+      const versions = await client.listVersions('123');
+      expect(versions).toHaveLength(201);
+      expect(versions[200].number).toBe(201);
+
+      mock.restore();
+    });
+
+    test('falls back to /rest/experimental/ on 404 (Server/DC)', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content/123/version').reply(404);
+      mock.onGet(/\/rest\/experimental\/content\/123\/version$/).reply(200, {
+        results: [{ number: 1, when: 't', by: { displayName: 'u' } }]
+      });
+
+      const versions = await client.listVersions('123');
+      expect(versions).toHaveLength(1);
+
+      mock.restore();
+    });
+  });
+
+  describe('deleteVersion', () => {
+    test('deletes via /content/{id}/version/{n}', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onDelete('/content/123/version/4').reply(204);
+
+      await expect(client.deleteVersion('123', 4))
+        .resolves.toEqual({ id: '123', versionNumber: 4, viaExperimental: false });
+
+      mock.restore();
+    });
+
+    test('falls back to /rest/experimental/ on 405', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onDelete('/content/123/version/4').reply(405);
+      mock.onDelete(/\/rest\/experimental\/content\/123\/version\/4$/).reply(204);
+
+      const result = await client.deleteVersion('123', 4);
+      expect(result).toEqual({ id: '123', versionNumber: 4, viaExperimental: true });
+
+      mock.restore();
+    });
+
+    test('falls back to /rest/experimental/ on 404 (Server/DC path)', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onDelete('/content/123/version/4').reply(404);
+      mock.onDelete(/\/rest\/experimental\/content\/123\/version\/4$/).reply(204);
+
+      const result = await client.deleteVersion('123', 4);
+      expect(result).toEqual({ id: '123', versionNumber: 4, viaExperimental: true });
+
+      mock.restore();
+    });
+
+    test('rejects non-positive integer versionNumber', async () => {
+      await expect(client.deleteVersion('123', 0)).rejects.toThrow(/positive integer/);
+      await expect(client.deleteVersion('123', 'abc')).rejects.toThrow(/positive integer/);
+    });
+  });
+
+  describe('purgeNonCurrentVersions', () => {
+    test('keeps the highest version and deletes the rest in descending order', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content/123/version').reply(200, {
+        results: [
+          { number: 1, when: 't', by: { displayName: 'u' } },
+          { number: 2, when: 't', by: { displayName: 'u' } },
+          { number: 3, when: 't', by: { displayName: 'u' } },
+          { number: 4, when: 't', by: { displayName: 'u' } }
+        ]
+      });
+      const calls = [];
+      mock.onDelete(/\/content\/123\/version\/(\d+)$/).reply(config => {
+        calls.push(config.url);
+        return [204];
+      });
+
+      const result = await client.purgeNonCurrentVersions('123');
+      expect(result).toEqual({ id: '123', kept: 4, deleted: 3, failed: 0, errors: [] });
+      expect(calls).toEqual([
+        '/content/123/version/3',
+        '/content/123/version/2',
+        '/content/123/version/1'
+      ]);
+
+      mock.restore();
+    });
+
+    test('returns 0/0 when only the current version exists', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content/123/version').reply(200, {
+        results: [{ number: 1, when: 't', by: { displayName: 'u' } }]
+      });
+
+      const result = await client.purgeNonCurrentVersions('123');
+      expect(result).toEqual({ id: '123', kept: 1, deleted: 0, failed: 0, errors: [] });
+
+      mock.restore();
+    });
+
+    test('records failures without aborting the loop', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content/123/version').reply(200, {
+        results: [
+          { number: 1, when: 't', by: { displayName: 'u' } },
+          { number: 2, when: 't', by: { displayName: 'u' } },
+          { number: 3, when: 't', by: { displayName: 'u' } }
+        ]
+      });
+      mock.onDelete('/content/123/version/2').reply(500);
+      mock.onDelete('/content/123/version/1').reply(204);
+
+      const result = await client.purgeNonCurrentVersions('123');
+      expect(result.deleted).toBe(1);
+      expect(result.failed).toBe(1);
+      expect(result.kept).toBe(3);
+      expect(result.errors[0].versionNumber).toBe(2);
+
+      mock.restore();
+    });
+
+    test('end-to-end fallback: list 404s on /api, deletes hit /experimental', async () => {
+      const mock = new MockAdapter(client.client);
+      // Modern path 404s on list — typical of Server/DC.
+      mock.onGet('/content/123/version').reply(404);
+      mock.onGet(/\/rest\/experimental\/content\/123\/version$/).reply(200, {
+        results: [
+          { number: 1, when: 't', by: { displayName: 'u' } },
+          { number: 2, when: 't', by: { displayName: 'u' } },
+          { number: 3, when: 't', by: { displayName: 'u' } }
+        ]
+      });
+      // Each deleteVersion attempts the modern path first, falls back.
+      // Register experimental matchers first so they take precedence
+      // over the broader modern-path regex.
+      mock.onDelete(/\/rest\/experimental\/content\/123\/version\/\d+$/).reply(204);
+      mock.onDelete(/\/content\/123\/version\/\d+$/).reply(404);
+
+      const result = await client.purgeNonCurrentVersions('123');
+      expect(result).toEqual({ id: '123', kept: 3, deleted: 2, failed: 0, errors: [] });
+
+      mock.restore();
+    });
+  });
+
+  describe('listVersions edge cases', () => {
+    test('returns empty array when API returns no results', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content/123/version').reply(200, { results: [] });
+
+      const versions = await client.listVersions('123');
+      expect(versions).toEqual([]);
+
+      mock.restore();
+    });
+
+    test('propagates 404 when both modern and experimental return 404 (page not found)', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content/missing/version').reply(404);
+      mock.onGet(/\/rest\/experimental\/content\/missing\/version$/).reply(404);
+
+      await expect(client.listVersions('missing')).rejects.toMatchObject({
+        response: { status: 404 }
+      });
 
       mock.restore();
     });
@@ -559,6 +2035,36 @@ describe('ConfluenceClient', () => {
       expect(typeof client.copyPageTree).toBe('function');
       expect(typeof client.buildPageTree).toBe('function');
       expect(typeof client.shouldExcludePage).toBe('function');
+    });
+
+    test('getAllDescendantPages caps concurrent getChildPages across the whole traversal', async () => {
+      let inFlight = 0;
+      let maxInFlight = 0;
+
+      const branchingFactor = 15;
+      const rootChildren = Array.from({ length: branchingFactor }, (_, i) => ({ id: `c${i}`, title: `child${i}` }));
+      const grandChildrenFor = (parentId) =>
+        Array.from({ length: branchingFactor }, (_, i) => ({ id: `${parentId}g${i}`, title: `${parentId}-gc${i}` }));
+
+      client.getChildPages = jest.fn(async (id) => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise(resolve => setImmediate(resolve));
+        try {
+          if (id === 'root') return rootChildren;
+          if (/^c\d+$/.test(id)) return grandChildrenFor(id);
+          return [];
+        } finally {
+          inFlight -= 1;
+        }
+      });
+
+      const descendants = await client.getAllDescendantPages('root');
+
+      expect(maxInFlight).toBeLessThanOrEqual(10);
+      expect(descendants).toHaveLength(branchingFactor + branchingFactor * branchingFactor);
+      expect(descendants.slice(0, branchingFactor).map(d => d.id)).toEqual(rootChildren.map(c => c.id));
+      expect(descendants.slice(0, branchingFactor).every(d => d.parentId === 'root')).toBe(true);
     });
 
     test('should correctly exclude pages based on patterns', () => {
@@ -771,6 +2277,66 @@ describe('ConfluenceClient', () => {
       }
     });
 
+    test('normalizeAttachment should return all fields needed for JSON output', () => {
+      const raw = {
+        id: '101',
+        title: 'diagram.png',
+        metadata: { mediaType: 'image/png' },
+        extensions: { fileSize: 204800 },
+        version: { number: 3 },
+        _links: { download: '/download/attachments/123/diagram.png' }
+      };
+      const result = client.normalizeAttachment(raw);
+      expect(result).toEqual({
+        id: '101',
+        title: 'diagram.png',
+        mediaType: 'image/png',
+        fileSize: 204800,
+        version: 3,
+        downloadLink: expect.stringContaining('/download/attachments/123/diagram.png')
+      });
+    });
+
+    test('normalizeAttachment should handle missing metadata gracefully', () => {
+      const raw = {
+        id: '102',
+        title: 'readme.txt',
+        version: { number: 1 },
+        _links: {}
+      };
+      const result = client.normalizeAttachment(raw);
+      expect(result.mediaType).toBe('');
+      expect(result.fileSize).toBe(0);
+      expect(result.version).toBe(1);
+      expect(result.downloadLink).toBeNull();
+    });
+
+    test('getAllAttachments should return normalized attachment objects', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content/123/child/attachment').reply(200, {
+        results: [{
+          id: '201',
+          title: 'report.pdf',
+          metadata: { mediaType: 'application/pdf' },
+          extensions: { fileSize: 512000 },
+          version: { number: 2 },
+          _links: { download: '/download/attachments/123/report.pdf' }
+        }],
+        _links: {}
+      });
+
+      const attachments = await client.getAllAttachments('123');
+      expect(attachments).toHaveLength(1);
+      expect(attachments[0]).toHaveProperty('id', '201');
+      expect(attachments[0]).toHaveProperty('title', 'report.pdf');
+      expect(attachments[0]).toHaveProperty('mediaType', 'application/pdf');
+      expect(attachments[0]).toHaveProperty('fileSize', 512000);
+      expect(attachments[0]).toHaveProperty('version', 2);
+      expect(attachments[0]).toHaveProperty('downloadLink');
+
+      mock.restore();
+    });
+
     test('deleteAttachment should call delete endpoint', async () => {
       const mock = new MockAdapter(client.client);
       mock.onDelete('/content/123/child/attachment/999').reply(204);
@@ -778,6 +2344,128 @@ describe('ConfluenceClient', () => {
       await expect(client.deleteAttachment('123', '999')).resolves.toEqual({ id: '999', pageId: '123' });
 
       mock.restore();
+    });
+
+    describe('downloadAttachment SSRF guard', () => {
+      test('isSameOriginAsConfigured returns true for the configured origin', () => {
+        expect(client.isSameOriginAsConfigured('https://test.atlassian.net/wiki/x')).toBe(true);
+      });
+
+      test('isSameOriginAsConfigured returns false for a different host', () => {
+        expect(client.isSameOriginAsConfigured('https://evil.com/wiki/x')).toBe(false);
+      });
+
+      test('isSameOriginAsConfigured returns false for an http:// downgrade against an https-configured client', () => {
+        expect(client.isSameOriginAsConfigured('http://test.atlassian.net/wiki/x')).toBe(false);
+      });
+
+      test('isSameOriginAsConfigured normalizes default ports in both directions', () => {
+        // bare configured domain matches an explicit default-port URL
+        expect(client.isSameOriginAsConfigured('https://test.atlassian.net:443/wiki/x')).toBe(true);
+
+        // configured domain with explicit :443 matches a bare URL on the same host
+        const explicitPortClient = new ConfluenceClient({
+          domain: 'test.atlassian.net:443',
+          token: 'test-token'
+        });
+        expect(explicitPortClient.isSameOriginAsConfigured('https://test.atlassian.net/wiki/x')).toBe(true);
+      });
+
+      test('isSameOriginAsConfigured rejects a non-default port even on the same host', () => {
+        expect(client.isSameOriginAsConfigured('https://test.atlassian.net:8443/wiki/x')).toBe(false);
+      });
+
+      test('isSameOriginAsConfigured returns false for malformed input', () => {
+        expect(client.isSameOriginAsConfigured('not a url')).toBe(false);
+        expect(client.isSameOriginAsConfigured('')).toBe(false);
+        expect(client.isSameOriginAsConfigured(null)).toBe(false);
+      });
+
+      test('assertSameOrigin throws a clear error naming both origins on mismatch', () => {
+        expect(() => client.assertSameOrigin('https://evil.com/file.pdf'))
+          .toThrow(/https:\/\/evil\.com.*https:\/\/test\.atlassian\.net/s);
+      });
+
+      test('assertSameOrigin throws on http:// downgrade and includes the protocol in the error', () => {
+        expect(() => client.assertSameOrigin('http://test.atlassian.net/file.pdf'))
+          .toThrow(/http:\/\/test\.atlassian\.net.*https:\/\/test\.atlassian\.net/s);
+      });
+
+      test('downloadAttachment refuses when the attachment object\'s downloadLink points to a foreign origin', async () => {
+        await expect(
+          client.downloadAttachment('123', { downloadLink: 'https://evil.example/exfil.bin' })
+        ).rejects.toThrow(/Refusing to send credentials to "https:\/\/evil\.example"/);
+      });
+
+      test('downloadAttachment refuses an http:// downgrade against an https-configured client', async () => {
+        await expect(
+          client.downloadAttachment('123', { downloadLink: 'http://test.atlassian.net/exfil.bin' })
+        ).rejects.toThrow(/Refusing to send credentials to "http:\/\/test\.atlassian\.net"/);
+      });
+
+      test('downloadAttachment refuses when the API returns a foreign-origin _links.download (Server)', async () => {
+        const serverClient = new ConfluenceClient({
+          domain: 'confluence.example.com',
+          token: 'pat',
+          authType: 'bearer'
+        });
+        const mock = new MockAdapter(serverClient.client);
+        mock.onGet('/content/123/child/attachment').reply(200, {
+          results: [{
+            id: '777',
+            title: 'pwn.bin',
+            _links: { download: 'https://evil.example/exfil.bin' }
+          }]
+        });
+
+        await expect(serverClient.downloadAttachment('123', '777'))
+          .rejects.toThrow(/Refusing to send credentials to "https:\/\/evil\.example"/);
+
+        mock.restore();
+      });
+
+      test('downloadAttachment uses the REST download endpoint on Cloud (attachment object)', async () => {
+        const mock = new MockAdapter(client.client);
+        mock.onGet('/content/123/child/attachment/att456/download').reply(200, 'BINARY');
+
+        const data = await client.downloadAttachment('123', {
+          id: 'att456',
+          title: 'diagram.png',
+          downloadLink: 'https://test.atlassian.net/wiki/download/attachments/123/diagram.png'
+        });
+
+        expect(data).toBe('BINARY');
+        mock.restore();
+      });
+
+      test('downloadAttachment uses the REST download endpoint on Cloud (attachment id)', async () => {
+        const mock = new MockAdapter(client.client);
+        mock.onGet('/content/123/child/attachment/777/download').reply(200, 'PNGDATA');
+
+        const data = await client.downloadAttachment('123', '777');
+
+        expect(data).toBe('PNGDATA');
+        mock.restore();
+      });
+
+      test('downloadAttachment uses the servlet download link on Server', async () => {
+        const serverClient = new ConfluenceClient({
+          domain: 'confluence.example.com',
+          token: 'pat',
+          authType: 'bearer'
+        });
+        const axiosMock = new MockAdapter(axios);
+        axiosMock.onGet('https://confluence.example.com/download/attachments/123/diagram.png').reply(200, 'SERVERBYTES');
+
+        const data = await serverClient.downloadAttachment('123', {
+          id: '777',
+          title: 'diagram.png',
+          downloadLink: 'https://confluence.example.com/download/attachments/123/diagram.png'
+        });
+
+        expect(data).toBe('SERVERBYTES');
+        axiosMock.restore();
+      });
     });
   });
 
@@ -996,6 +2684,160 @@ describe('ConfluenceClient', () => {
         'status'
       );
       expect(result).toEqual({ pageId: '789', key: 'status' });
+
+      mock.restore();
+    });
+  });
+
+  describe('rawRequest', () => {
+    test('GET with relative endpoint', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content/123').reply(200, { id: '123', title: 'Test' });
+
+      const result = await client.rawRequest('GET', 'content/123');
+      expect(result.status).toBe(200);
+      expect(result.data).toEqual({ id: '123', title: 'Test' });
+
+      mock.restore();
+    });
+
+    test('GET with query params', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content').reply(config => {
+        expect(config.params).toEqual({ spaceKey: 'DEV', limit: '10' });
+        return [200, { results: [] }];
+      });
+
+      const result = await client.rawRequest('GET', 'content', {
+        params: { spaceKey: 'DEV', limit: '10' },
+      });
+      expect(result.status).toBe(200);
+
+      mock.restore();
+    });
+
+    test('POST with JSON body', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onPost('/content').reply(config => {
+        expect(JSON.parse(config.data)).toEqual({ title: 'New Page', type: 'page' });
+        return [200, { id: '456' }];
+      });
+
+      const result = await client.rawRequest('POST', 'content', {
+        data: { title: 'New Page', type: 'page' },
+      });
+      expect(result.status).toBe(200);
+      expect(result.data).toEqual({ id: '456' });
+
+      mock.restore();
+    });
+
+    test('absolute path bypasses apiPath', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('https://test.atlassian.net/wiki/api/v2/pages').reply(200, { results: [] });
+
+      const result = await client.rawRequest('GET', '/wiki/api/v2/pages');
+      expect(result.status).toBe(200);
+
+      mock.restore();
+    });
+
+    test('full URL used as-is', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('https://other.example.com/api/data').reply(200, { ok: true });
+
+      const result = await client.rawRequest('GET', 'https://other.example.com/api/data');
+      expect(result.status).toBe(200);
+      expect(result.data).toEqual({ ok: true });
+
+      mock.restore();
+    });
+
+    test('custom headers sent alongside auth headers', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content').reply(config => {
+        expect(config.headers['X-Custom']).toBe('value');
+        expect(config.headers.Authorization).toBeDefined();
+        return [200, {}];
+      });
+
+      await client.rawRequest('GET', 'content', {
+        headers: { 'X-Custom': 'value' },
+      });
+
+      mock.restore();
+    });
+
+    test('PUT method', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onPut('/content/123').reply(200, { updated: true });
+
+      const result = await client.rawRequest('PUT', 'content/123', {
+        data: { title: 'Updated' },
+      });
+      expect(result.status).toBe(200);
+
+      mock.restore();
+    });
+
+    test('DELETE method', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onDelete('/content/123').reply(204);
+
+      const result = await client.rawRequest('DELETE', 'content/123');
+      expect(result.status).toBe(204);
+
+      mock.restore();
+    });
+
+    test('HTTP error propagation', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content/999').reply(404, { message: 'Not found' });
+
+      await expect(client.rawRequest('GET', 'content/999')).rejects.toThrow();
+
+      mock.restore();
+    });
+
+    test('auth headers preserved with basic auth', async () => {
+      const basicClient = new ConfluenceClient({
+        domain: 'test.atlassian.net',
+        token: 'test-token',
+        email: 'user@example.com',
+        authType: 'basic',
+      });
+      const mock = new MockAdapter(basicClient.client);
+      mock.onGet('/content').reply(config => {
+        expect(config.headers.Authorization).toMatch(/^Basic /);
+        return [200, {}];
+      });
+
+      await basicClient.rawRequest('GET', 'content');
+
+      mock.restore();
+    });
+
+    test('auth headers preserved with bearer token', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content').reply(config => {
+        expect(config.headers.Authorization).toBe('Bearer test-token');
+        return [200, {}];
+      });
+
+      await client.rawRequest('GET', 'content');
+
+      mock.restore();
+    });
+
+    test('returns status, headers, and data', async () => {
+      const mock = new MockAdapter(client.client);
+      mock.onGet('/content').reply(200, { items: [] }, { 'x-request-id': 'abc123' });
+
+      const result = await client.rawRequest('GET', 'content');
+      expect(result).toHaveProperty('status', 200);
+      expect(result).toHaveProperty('headers');
+      expect(result).toHaveProperty('data');
+      expect(result.headers['x-request-id']).toBe('abc123');
 
       mock.restore();
     });

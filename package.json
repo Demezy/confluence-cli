@@ -1,6 +1,6 @@
 {
   "name": "confluence-cli",
-  "version": "1.19.0",
+  "version": "2.12.0",
   "description": "A command-line interface for Atlassian Confluence with page creation and editing capabilities",
   "main": "index.js",
   "bin": {
@@ -23,14 +23,15 @@
   "author": "pchuri",
   "license": "MIT",
   "dependencies": {
-    "axios": "^1.12.0",
+    "axios": "~1.16.1",
     "chalk": "^4.1.2",
     "commander": "^11.1.0",
+    "entities": "^4.5.0",
     "form-data": "^4.0.5",
     "html-to-text": "^9.0.5",
+    "htmlparser2": "^9.1.0",
     "inquirer": "^8.2.6",
-    "markdown-it": "^14.1.0",
-    "ora": "^5.4.1"
+    "markdown-it": "^14.1.0"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
@@ -45,7 +46,7 @@
     }
   },
   "engines": {
-    "node": ">=14.0.0"
+    "node": ">=18.0.0"
   },
   "repository": {
     "type": "git",
@@ -54,5 +55,12 @@
   "bugs": {
     "url": "https://github.com/pchuri/confluence-cli/issues"
   },
-  "homepage": "https://github.com/pchuri/confluence-cli#readme"
+  "homepage": "https://github.com/pchuri/confluence-cli#readme",
+  "files": [
+    "bin/",
+    "lib/",
+    "plugins/",
+    ".claude-plugin/",
+    "npm-shrinkwrap.json"
+  ]
 }
